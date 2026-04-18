@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DeepStream WebRTC — KLV Telemetry Dashboard</title>
+
+<!-- Leaflet Map -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+
+<!-- ── Top Bar ── -->
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="logo">
+      <span class="logo-dot"></span>
+      <span>DeepStream WebRTC</span>
+    </div>
+    <div class="status-pill" id="global-status">
+      <span class="status-dot"></span>
+      <span id="global-status-text">Disconnected</span>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <button class="btn btn-primary" onclick="UI.openAddStreamModal()">+ Add Stream</button>
+    <button class="btn btn-ghost" onclick="UI.toggleLayout()">⊞ Layout</button>
+  </div>
+</header>
+
+<!-- ── Main Layout ── -->
+<div class="main-layout" id="main-layout">
+
+  <!-- Left: Stream list -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <span>Streams</span>
+      <span class="badge" id="stream-count">0</span>
+    </div>
+    <div class="stream-list" id="stream-list">
+      <div class="empty-state">
+        <div class="empty-icon">📡</div>
+        <p>No streams yet.<br>Add an RTSP or UDP stream.</p>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Center: Video + Map -->
+  <main class="content">
+    <!-- Video grid -->
+    <div class="video-section">
+      <div class="section-header">
+        <span>Video Streams</span>
+        <div class="view-controls">
+          <button class="view-btn active" data-cols="1" onclick="UI.setVideoColumns(1)">1</button>
+          <button class="view-btn" data-cols="2" onclick="UI.setVideoColumns(2)">2</button>
+          <button class="view-btn" data-cols="4" onclick="UI.setVideoColumns(4)">4</button>
+        </div>
+      </div>
+      <div class="video-grid" id="video-grid">
+        <div class="no-video">
+          <div class="no-video-inner">
+            <div class="no-video-icon">▶</div>
+            <p>Add a stream to start watching</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Map -->
+    <div class="map-section">
+      <div class="section-header">
+        <span>Live Position Map</span>
+        <div class="map-controls">
+          <button class="btn btn-ghost btn-sm" onclick="UI.centerMap()">⊙ Center</button>
+          <button class="btn btn-ghost btn-sm" onclick="UI.clearTracks()">✕ Clear tracks</button>
+          <label class="toggle-wrap">
+            <input type="checkbox" id="follow-toggle" checked onchange="UI.toggleFollow(this.checked)">
+            <span class="toggle-label">Follow</span>
+          </label>
+        </div>
+      </div>
+      <div id="map"></div>
+    </div>
+  </main>
+
+  <!-- Right: Telemetry panel -->
+  <aside class="telemetry-panel">
+    <div class="sidebar-header">
+      <span>KLV Telemetry</span>
+      <span class="badge badge-live" id="klv-badge">LIVE</span>
+    </div>
+
+    <!-- Stream selector -->
+    <div class="telemetry-stream-selector">
+      <select id="telemetry-stream-select" onchange="UI.switchTelemetryStream(this.value)">
+        <option value="">— Select stream —</option>
+      </select>
+    </div>
+
+    <!-- Position -->
+    <div class="telemetry-group">
+      <div class="telemetry-group-title">📍 Position</div>
+      <div class="telemetry-row">
+        <span class="tlabel">Latitude</span>
+        <span class="tvalue" id="t-lat">—</span>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">Longitude</span>
+        <span class="tvalue" id="t-lon">—</span>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">Altitude</span>
+        <span class="tvalue" id="t-alt">—</span>
+      </div>
+    </div>
+
+    <!-- Attitude -->
+    <div class="telemetry-group">
+      <div class="telemetry-group-title">✈ Attitude</div>
+      <div class="telemetry-row">
+        <span class="tlabel">Heading</span>
+        <span class="tvalue" id="t-heading">—</span>
+        <div class="compass-mini" id="compass">
+          <div class="compass-needle" id="compass-needle"></div>
+        </div>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">Pitch</span>
+        <span class="tvalue" id="t-pitch">—</span>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">Roll</span>
+        <span class="tvalue" id="t-roll">—</span>
+      </div>
+    </div>
+
+    <!-- Performance -->
+    <div class="telemetry-group">
+      <div class="telemetry-group-title">⚡ Performance</div>
+      <div class="telemetry-row">
+        <span class="tlabel">Airspeed</span>
+        <span class="tvalue" id="t-airspeed">—</span>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">Slant Range</span>
+        <span class="tvalue" id="t-slant">—</span>
+      </div>
+    </div>
+
+    <!-- Mission -->
+    <div class="telemetry-group">
+      <div class="telemetry-group-title">📋 Mission</div>
+      <div class="telemetry-row">
+        <span class="tlabel">Platform</span>
+        <span class="tvalue" id="t-platform">—</span>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">Mission ID</span>
+        <span class="tvalue" id="t-mission">—</span>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">Timestamp</span>
+        <span class="tvalue" id="t-ts">—</span>
+      </div>
+    </div>
+
+    <!-- Frame center -->
+    <div class="telemetry-group">
+      <div class="telemetry-group-title">🎯 Frame Center</div>
+      <div class="telemetry-row">
+        <span class="tlabel">Lat</span>
+        <span class="tvalue" id="t-flat">—</span>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">Lon</span>
+        <span class="tvalue" id="t-flon">—</span>
+      </div>
+      <div class="telemetry-row">
+        <span class="tlabel">HFOV</span>
+        <span class="tvalue" id="t-hfov">—</span>
+      </div>
+    </div>
+
+    <!-- KLV rate graph (sparkline) -->
+    <div class="telemetry-group">
+      <div class="telemetry-group-title">📈 KLV Rate</div>
+      <canvas id="klv-sparkline" width="200" height="50"></canvas>
+    </div>
+
+    <!-- Raw JSON dump -->
+    <div class="telemetry-group collapsible" id="raw-group">
+      <div class="telemetry-group-title clickable" onclick="UI.toggleRaw()">
+        { } Raw KLV <span id="raw-arrow">▼</span>
+      </div>
+      <pre class="raw-json" id="raw-json"></pre>
+    </div>
+  </aside>
+</div>
+
+<!-- ── Add Stream Modal ── -->
+<div class="modal-overlay" id="add-stream-modal" onclick="UI.closeModal(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Add Stream</h2>
+      <button class="modal-close" onclick="UI.closeAddStreamModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>Stream URL</label>
+        <input type="text" id="stream-uri" placeholder="rtsp://192.168.1.100:554/stream1"
+               class="form-input"/>
+        <div class="form-hint">
+          Supports: <code>rtsp://...</code> &nbsp; <code>udp://0.0.0.0:5004</code>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Name (optional)</label>
+        <input type="text" id="stream-name" placeholder="Camera 1" class="form-input"/>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Width</label>
+          <input type="number" id="stream-width" value="1280" class="form-input"/>
+        </div>
+        <div class="form-group">
+          <label>Height</label>
+          <input type="number" id="stream-height" value="720" class="form-input"/>
+        </div>
+      </div>
+
+      <!-- Quick presets -->
+      <div class="presets">
+        <span class="preset-label">Presets:</span>
+        <button class="preset-btn" onclick="UI.setPreset('rtsp://demo.akamai.com/live/rtsp/stream1')">Akamai Demo</button>
+        <button class="preset-btn" onclick="UI.setPreset('udp://0.0.0.0:5004')">UDP :5004</button>
+        <button class="preset-btn" onclick="UI.setPreset('rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4')">Test RTSP</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="UI.closeAddStreamModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="UI.addStream()">Add Stream</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Notification toast ── -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

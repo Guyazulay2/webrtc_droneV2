@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  deepstream-webrtc:
+    build: .
+    image: deepstream-webrtc-klv:latest
+    container_name: deepstream-webrtc
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - GST_DEBUG=2
+      - DISPLAY=:0
+    ports:
+      - "8080:8080"   # Web UI + REST API
+      - "8443:8443"   # WebSocket Signaling (WSS)
+      - "8554:8554"   # RTSP re-stream (optional)
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ./backend:/app/backend   # hot reload during dev
+      - ./ui:/var/www/html        # hot reload UI
+    network_mode: host            # needed for WebRTC ICE candidates
+    restart: unless-stopped
+    privileged: false
+
+# If you don't have a GPU, comment out runtime: nvidia
+# and change nvstreammux to regular streammux in pipeline.py

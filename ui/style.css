@@ -431,3 +431,13 @@ body {
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* Test source preset buttons */
+.preset-btn.preset-test {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #f59e0b;
+}
+.preset-btn.preset-test:hover {
+  background: rgba(245, 158, 11, 0.3);
+}

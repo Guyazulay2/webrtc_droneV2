@@ -234,8 +234,13 @@
 
       <!-- Quick presets -->
       <div class="presets">
-        <span class="preset-label">Presets:</span>
-        <button class="preset-btn" onclick="UI.setPreset('rtsp://demo.akamai.com/live/rtsp/stream1')">Akamai Demo</button>
+        <span class="preset-label">🧪 Test (no network):</span>
+        <button class="preset-btn preset-test" onclick="UI.setPreset('test://')">Colour Bars</button>
+        <button class="preset-btn preset-test" onclick="UI.setPreset('test://ball')">Ball</button>
+        <button class="preset-btn preset-test" onclick="UI.setPreset('test://snow')">Snow</button>
+      </div>
+      <div class="presets">
+        <span class="preset-label">📡 Real streams:</span>
         <button class="preset-btn" onclick="UI.setPreset('udp://0.0.0.0:5004')">UDP :5004</button>
         <button class="preset-btn" onclick="UI.setPreset('rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4')">Test RTSP</button>
       </div>

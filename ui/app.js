@@ -132,9 +132,62 @@ function getStreamColor(streamId) {
 // ── WebRTC ─────────────────────────────────────────────────────────────────────
 
 const RTC_CONFIG = {
-  // localhost — no STUN needed, avoids UPnP delays
-  iceServers: [],
+  // STUN is needed so Chrome sends real IP candidates instead of mDNS (.local)
+  // addresses. GStreamer cannot resolve mDNS, so without STUN all ICE candidates
+  // are filtered out and DTLS never completes.
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
+
+/**
+ * modify_sdp — ported from the working legacy client.
+ * Patches the GStreamer H264 offer so Chrome/Firefox can decode:
+ *  - forces profile-level-id=42001f (constrained-baseline)
+ *  - forces level-asymmetry-allowed=1
+ * Returns [modifiedOffer, revertFn] so we can un-patch the answer.
+ */
+function modify_sdp(data) {
+  const REGEX_H264   = /H264\/90000/;
+  const REGEX_level  = /level-asymmetry-allowed=([^;"\s\r\n]+)/;
+  const REGEX_profile= /profile-level-id=([^;"\s\r\n]+)/;
+
+  if (!data.sdp || !REGEX_H264.test(data.sdp)) {
+    return [data, d => d];
+  }
+
+  let sdp = data.sdp;
+  let origLevel, origProfile;
+
+  const mLevel = sdp.match(REGEX_level);
+  if (mLevel) {
+    origLevel = mLevel[1];
+    sdp = sdp.replace(REGEX_level, "level-asymmetry-allowed=1");
+  }
+
+  const mProfile = sdp.match(REGEX_profile);
+  if (mProfile) {
+    origProfile = mProfile[1];
+    sdp = sdp.replace(REGEX_profile,
+      `profile-level-id=42001f${origLevel ? "" : ";level-asymmetry-allowed=1"}`);
+  }
+
+  const modified = { type: data.type, sdp };
+
+  const revert = (d) => {
+    if (!d.sdp) return d;
+    let s = d.sdp;
+    if (origLevel) {
+      s = s.replace("level-asymmetry-allowed=1", `level-asymmetry-allowed=${origLevel}`);
+    } else {
+      s = s.replace(/;?level-asymmetry-allowed=1/g, "");
+    }
+    if (origProfile) {
+      s = s.replace("profile-level-id=42001f", `profile-level-id=${origProfile}`);
+    }
+    return { type: d.type, sdp: s };
+  };
+
+  return [modified, revert];
+}
 
 function createWebRTCConnection(streamId) {
   const stream = state.streams[streamId];
@@ -147,35 +200,101 @@ function createWebRTCConnection(streamId) {
   const ws = new WebSocket(`${WS_BASE}/ws/signaling/${streamId}`);
   stream.ws = ws;
 
-  // PeerConnection
+  // PeerConnection — no addTransceiver here.
+  // Server sends offer first; adding a transceiver before setRemoteDescription
+  // creates a duplicate m-line which breaks negotiation.
   const pc = new RTCPeerConnection(RTC_CONFIG);
   stream.pc = pc;
 
-  // Receive video track
+  // Receive video track — identical approach to working test_webrtc.py
   pc.ontrack = (event) => {
     console.log(`[${streamId}] ontrack kind=${event.track.kind} streams=${event.streams.length}`);
-    if (event.track.kind === "video") {
-      stream.videoEl.srcObject = event.streams?.[0] || new MediaStream([event.track]);
-      stream.videoEl.play().catch(e => console.warn("play:", e));
-      stream.status = "live";
-      updateStreamCard(streamId);
-      updateVideoTileBadge(streamId, "live");
-      showToast(`Stream ${stream.config.name} — live ✓`, "success");
+    if (event.track.kind !== "video") return;
+
+    const videoEl = stream.videoEl;
+    videoEl.muted = true;
+
+    // Use streams[0] if available; otherwise wrap track in new MediaStream.
+    // GStreamer may not send msid so streams[0] could be empty — check readyState.
+    if (event.streams && event.streams[0] && event.streams[0].getTracks().length > 0) {
+      videoEl.srcObject = event.streams[0];
+    } else {
+      // No stream attached to track (missing msid) — create one manually
+      const ms = new MediaStream();
+      ms.addTrack(event.track);
+      videoEl.srcObject = ms;
     }
+
+    // Also handle track mute/unmute events
+    event.track.onunmute = () => {
+      console.log(`[${streamId}] track unmuted — retrying play`);
+      videoEl.play().catch(() => {});
+    };
+
+    const tryPlay = () => {
+      videoEl.play().then(() => {
+        console.log(`[${streamId}] ▶ video playing`);
+        stream.status = "live";
+        updateStreamCard(streamId);
+        updateVideoTileBadge(streamId, "live");
+        showToast(`Stream ${stream.config.name} — live ✓`, "success");
+      }).catch(e => {
+        if (e.name === "AbortError") {
+          // Another load interrupted — retry once after short delay
+          console.warn(`[${streamId}] play() AbortError — retrying in 200ms`);
+          setTimeout(tryPlay, 200);
+          return;
+        }
+        if (e.name === "NotAllowedError") {
+          console.warn(`[${streamId}] play() blocked by autoplay — showing overlay`);
+          _showPlayOverlay(streamId);
+          return;
+        }
+        console.error(`[${streamId}] play() error:`, e.name, e.message);
+      });
+    };
+
+    // Small delay so srcObject assignment fully propagates before play()
+    setTimeout(tryPlay, 50);
+
+    // Debug: log RTP stats after 4s — check framesDecoded in console
+    setTimeout(async () => {
+      try {
+        const stats = await pc.getStats();
+        stats.forEach(r => {
+          if (r.type === "inbound-rtp" && r.kind === "video") {
+            console.log(`[${streamId}] RTP stats — framesDecoded:${r.framesDecoded} bytesReceived:${r.bytesReceived} packetsLost:${r.packetsLost} jitter:${r.jitter?.toFixed(3)}`);
+            if (r.framesDecoded === 0 && r.bytesReceived > 0) {
+              console.warn(`[${streamId}] ⚠ bytes arriving but 0 frames decoded — likely codec/profile mismatch`);
+            } else if (r.bytesReceived === 0) {
+              console.warn(`[${streamId}] ⚠ 0 bytes received — RTP not reaching browser`);
+            }
+          }
+        });
+      } catch(_) {}
+    }, 4000);
   };
 
 
 
   pc.onconnectionstatechange = () => {
-    console.log(`[${streamId}] PC state: ${pc.connectionState}`);
-    if (pc.connectionState === "connected") {
-      console.log(`[${streamId}] ✅ WebRTC connected!`);
+    const cs = pc.connectionState;
+    console.log(`[${streamId}] PC state: ${cs}`);
+    if (cs === "connected") {
+      console.log(`[${streamId}] ✅ WebRTC connected`);
+      stream._reconnectAttempts = 0;
     }
-    if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+    // "disconnected" is transient (network blip) — wait, don't reconnect yet.
+    // Only reconnect on hard "failed". This stops the AbortError loop.
+    if (cs === "failed") {
       stream.status = "error";
       updateStreamCard(streamId);
       updateVideoTileBadge(streamId, "error");
-      setTimeout(() => reconnectStream(streamId), 3000);
+      const attempts = (stream._reconnectAttempts || 0) + 1;
+      stream._reconnectAttempts = attempts;
+      const delay = Math.min(1000 * attempts, 8000); // back-off: 1s, 2s, 4s, 8s max
+      console.warn(`[${streamId}] PC failed — reconnect attempt ${attempts} in ${delay}ms`);
+      setTimeout(() => reconnectStream(streamId), delay);
     }
   };
 
@@ -216,19 +335,46 @@ function createWebRTCConnection(streamId) {
   ws.onmessage = async (event) => {
     const msg = JSON.parse(event.data);
 
-    if (msg.type === "sdp" && msg.data.type === "offer") {
+    // Support both formats:
+    //   new pipeline: {type:"offer", sdp:"..."}
+    //   old pipeline: {type:"sdp", data:{type:"offer", sdp:"..."}}
+    const isOffer = (msg.type === "offer") ||
+                    (msg.type === "sdp" && msg.data?.type === "offer");
+    const offerSdp = msg.sdp || msg.data?.sdp;
+
+    if (isOffer && offerSdp) {
       try {
-        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+        console.log(`[${streamId}] SDP offer received`);
+        const offerObj = { type: "offer", sdp: offerSdp };
+        const dirMatch = offerSdp.match(/a=(sendonly|recvonly|sendrecv|inactive)/);
+        if (dirMatch) console.log(`[${streamId}] Offer direction: ${dirMatch[1]}`);
+
+        const [offerPatched] = modify_sdp(offerObj);
+
+        await pc.setRemoteDescription(new RTCSessionDescription(offerPatched));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
+
+        const answerSetup = answer.sdp.match(/a=setup:(\S+)/)?.[1];
+        const answerDir   = answer.sdp.match(/a=(sendonly|recvonly|sendrecv|inactive)/)?.[1];
+        console.log(`[${streamId}] Answer setup: ${answerSetup}, direction: ${answerDir}`);
+
+        // Send answer as-is — do NOT revert SDP, it can corrupt a=setup
         ws.send(JSON.stringify({ type: "sdp", data: { type: "answer", sdp: answer.sdp } }));
+        console.log(`[${streamId}] SDP answer sent`);
       } catch(e) {
-        console.error(`[${streamId}] setRemoteDescription failed:`, e.message);
+        console.error(`[${streamId}] SDP negotiation error:`, e.name, e.message);
       }
 
-    } else if (msg.type === "ice" && msg.data.candidate) {
+    } else if (msg.type === "ice") {
+      // Support both formats: {data:{candidate,sdpMLineIndex}} and {candidate,sdpMLineIndex}
+      const iceData = msg.data || msg;
+      if (!iceData.candidate) return;
       try {
-        await pc.addIceCandidate(new RTCIceCandidate(msg.data));
+        await pc.addIceCandidate(new RTCIceCandidate({
+          candidate: iceData.candidate,
+          sdpMLineIndex: iceData.sdpMLineIndex,
+        }));
       } catch (e) {
         console.warn("ICE candidate error:", e);
       }
@@ -249,6 +395,62 @@ function createWebRTCConnection(streamId) {
   ws.onclose = () => {
     console.log(`[${streamId}] Signaling WS closed`);
   };
+}
+
+function reconnectStream(streamId) {
+  const stream = state.streams[streamId];
+  if (!stream) return;
+  // Guard: if a reconnect is already in flight, skip
+  if (stream._reconnecting) return;
+  stream._reconnecting = true;
+
+  console.log(`[${streamId}] reconnecting (attempt ${stream._reconnectAttempts || 1})...`);
+  showToast(`Reconnecting ${stream.config?.name || streamId}...`, "info", 2000);
+
+  // Stop video element cleanly before closing PC
+  // This prevents AbortError from a pending play() call
+  const vid = stream.videoEl;
+  if (vid) {
+    vid.pause();
+    vid.srcObject = null;
+  }
+
+  stream.ws?.close();
+  try { stream.pc?.close(); } catch(_) {}
+  stream.pc = null;
+  stream.ws = null;
+  stream.status = "connecting";
+  updateStreamCard(streamId);
+  updateVideoTileBadge(streamId, "connecting");
+
+  setTimeout(() => {
+    stream._reconnecting = false;
+    if (state.streams[streamId]) {
+      createWebRTCConnection(streamId);
+    }
+  }, 500);
+}
+
+function _showPlayOverlay(streamId) {
+  const tile = document.getElementById(`tile-${streamId}`);
+  if (!tile || tile.querySelector(".play-overlay")) return;
+  const ov = document.createElement("div");
+  ov.className = "play-overlay";
+  ov.style.cssText = "position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);cursor:pointer;z-index:10;border-radius:8px";
+  ov.innerHTML = `
+    <div style="font-size:48px;margin-bottom:12px">▶</div>
+    <button style="padding:14px 32px;font-size:16px;border-radius:8px;border:none;background:#4f7ef8;color:#fff;cursor:pointer;font-weight:600">Click to Play</button>
+    <div style="margin-top:8px;font-size:11px;color:#aaa">Browser blocked autoplay</div>
+  `;
+  ov.onclick = () => {
+    const stream = state.streams[streamId];
+    if (!stream?.videoEl) return;
+    stream.videoEl.muted = true;
+    stream.videoEl.play()
+      .then(() => { ov.remove(); console.log(`[${streamId}] ▶ playing after click`); })
+      .catch(e => console.error(`[${streamId}] click play failed:`, e));
+  };
+  tile.appendChild(ov);
 }
 
 function destroyWebRTCConnection(streamId) {
@@ -505,16 +707,22 @@ function addVideoTile(streamId, name, videoEl) {
   const tile = document.createElement("div");
   tile.className = "video-tile";
   tile.id = `tile-${streamId}`;
+
+  // Build overlay and button WITHOUT touching videoEl via innerHTML.
+  // innerHTML+= destroys existing DOM nodes including the video element,
+  // which means srcObject is lost and the video never shows.
+  const overlay = document.createElement("div");
+  overlay.className = "video-tile-overlay";
+  overlay.innerHTML = `<span class="video-tile-name">${name || streamId}</span><span class="video-tile-badge connecting" id="badge-${streamId}">Connecting</span>`;
+
+  const fsBtn = document.createElement("button");
+  fsBtn.className = "video-fullscreen-btn";
+  fsBtn.textContent = "⛶";
+  fsBtn.onclick = () => toggleFullscreen(streamId);
+
   tile.appendChild(videoEl);
-  tile.innerHTML += `
-    <div class="video-tile-overlay">
-      <span class="video-tile-name">${name || streamId}</span>
-      <span class="video-tile-badge connecting" id="badge-${streamId}">Connecting</span>
-    </div>
-    <button class="video-fullscreen-btn" onclick="toggleFullscreen('${streamId}')">⛶</button>
-  `;
-  // Re-append videoEl (innerHTML replaced it)
-  tile.insertBefore(videoEl, tile.firstChild);
+  tile.appendChild(overlay);
+  tile.appendChild(fsBtn);
   grid.appendChild(tile);
 }
 

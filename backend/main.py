@@ -95,6 +95,8 @@ async def lifespan(app: FastAPI):
         send_signaling=send_signaling,
     )
     pipeline_mgr.start_mainloop()
+    if hasattr(pipeline_mgr, "set_event_loop"):
+        pipeline_mgr.set_event_loop(_loop)
     logger.info("Server started")
     for i, uri in enumerate(os.getenv("STREAMS", "").split()):
         if uri.strip():
@@ -192,13 +194,16 @@ async def signaling_ws(ws: WebSocket, stream_id: str):
                         {"type": "error", "message": f"Stream {stream_id} not found"}))
             elif t == "sdp" and msg.get("data", {}).get("type") == "answer":
                 if pipeline_mgr:
-                    pipeline_mgr.handle_peer_sdp(peer_id, stream_id, msg["data"]["sdp"])
+                    sdp_answer = msg["data"]["sdp"]
+                    logger.info(f"Answer SDP from browser:\n{sdp_answer}")
+                    pipeline_mgr.handle_peer_sdp(peer_id, stream_id, sdp_answer)
             elif t == "ice":
                 if pipeline_mgr:
-                    pipeline_mgr.handle_peer_ice(
-                        peer_id, stream_id,
-                        msg.get("data", {}).get("candidate", ""),
-                        msg.get("data", {}).get("sdpMLineIndex", 0))
+                    ice_data = msg.get("data", {})
+                    candidate = ice_data.get("candidate", "")
+                    mline = ice_data.get("sdpMLineIndex", 0)
+                    logger.info(f"ICE from browser: mline={mline} cand={candidate[:50] if candidate else 'EMPTY'}")
+                    pipeline_mgr.handle_peer_ice(peer_id, stream_id, candidate, mline)
     except WebSocketDisconnect:
         pass
     except Exception as e:

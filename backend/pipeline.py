@@ -88,6 +88,11 @@ def _fix_sdp(sdp: str) -> str:
         if line.strip() == "a=rtcp-mux-only":
             continue
 
+        # Force profile-level-id=42c01f so Chrome decodes constrained-baseline
+        if line.strip().startswith("a=fmtp:") and "profile-level-id=" in line:
+            line = re.sub(r"profile-level-id=[0-9a-fA-F]+",
+                          "profile-level-id=42c01f", line)
+
         out.append(line)
 
     # Fix a=group:BUNDLE to only list video0
@@ -157,12 +162,16 @@ class StreamPipeline:
 
         elif uri.startswith("udp://"):
             port = uri.split(":")[-1] if ":" in uri else "5004"
-            src = (
+            return (
                 f'udpsrc address=0.0.0.0 port={port} '
                 f'caps="application/x-rtp,media=video,clock-rate=90000,'
                 f'encoding-name=H264,payload=96" '
-                f'! rtpjitterbuffer latency=100 drop-on-latency=true '
-                f'! rtph264depay ! h264parse ! avdec_h264 '
+                f'! rtpjitterbuffer latency=200 drop-on-latency=true '
+                f'! rtph264depay '
+                f'! h264parse config-interval=-1 '
+                f'! rtph264pay config-interval=-1 aggregate-mode=zero-latency pt=96 '
+                f'! tee name=tee_{sid} allow-not-linked=true '
+                f'tee_{sid}. ! queue ! fakesink sync=false'
             )
 
         elif uri.startswith("rtsp://"):

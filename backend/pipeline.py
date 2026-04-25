@@ -141,6 +141,8 @@ class StreamPipeline:
 
         # All non-test sources: decode → re-encode as H264 constrained-baseline
         # so the output is always compatible with browsers regardless of source.
+        # queue: unlimited buffers (0=unlimited) so frames are never dropped.
+        # sync=false on fakesink so GStreamer doesn't stall on clock sync.
         encode = (
             "! videoconvert ! video/x-raw,format=I420 "
             "! x264enc tune=zerolatency bitrate=2000 speed-preset=ultrafast "
@@ -161,6 +163,8 @@ class StreamPipeline:
             )
 
         elif uri.startswith("udp://"):
+            # Passthrough: sender already outputs constrained-baseline H264 in RTP.
+            # No decode/re-encode → no profile drift, no CPU waste.
             port = uri.split(":")[-1] if ":" in uri else "5004"
             return (
                 f'udpsrc address=0.0.0.0 port={port} '
@@ -171,7 +175,7 @@ class StreamPipeline:
                 f'! h264parse config-interval=-1 '
                 f'! rtph264pay config-interval=-1 aggregate-mode=zero-latency pt=96 '
                 f'! tee name=tee_{sid} allow-not-linked=true '
-                f'tee_{sid}. ! queue ! fakesink sync=false'
+                f'tee_{sid}. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! fakesink sync=false async=false'
             )
 
         elif uri.startswith("rtsp://"):
@@ -181,14 +185,23 @@ class StreamPipeline:
             )
 
         else:
-            src = f"uridecodebin uri={uri} latency=200 "
+            # TS file: filesrc → tsparse → tsdemux → h264 branch
+            # Use sync=false so file plays at full speed without clock stalls.
+            path = uri.replace("file://", "") if uri.startswith("file://") else uri
+            src = (
+                f"filesrc location={path} "
+                f"! tsparse set-timestamps=true "
+                f"! tsdemux name=demux demux. "
+                f"! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 "
+                f"! h264parse "
+            )
 
         return (
             f"{src}"
             f"{encode}"
             f"! rtph264pay config-interval=-1 pt=96 "
             f"! tee name=tee_{sid} allow-not-linked=true "
-            f"tee_{sid}. ! queue ! fakesink sync=false"
+            f"tee_{sid}. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! fakesink sync=false async=false"
         )
 
     # ── Start / Stop ──────────────────────────────────────────────────────────

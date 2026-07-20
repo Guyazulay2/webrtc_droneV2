@@ -1,0 +1,44 @@
+image:
+  repository: ""          # מוזרק מ-CI/CD: ECR_URL
+  tag: latest
+  pullPolicy: Always
+
+replicaCount: 2
+
+resources:
+  requests:
+    memory: 256Mi
+    cpu: 250m
+  limits:
+    memory: 1Gi
+    cpu: 1000m
+
+service:
+  http:
+    port: 8080
+  udp:
+    rtpPort:  5004
+    klvPort:  5005
+    rtspPort: 8554
+
+ingress:
+  enabled: true
+  # ALB DNS name — מתמלא אוטומטית אחרי deploy
+  # kubectl get ingress -n deepstream-webrtc
+  host: ""
+  # ACM certificate ARN — השאר ריק להשתמש ב-HTTP בלבד (לפיתוח)
+  certificateArn: ""
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuTarget: 70
+
+env:
+  GST_DEBUG: "2"
+  USE_GPU: "0"
+  LIBNICE_NOUPNP: "1"
+  # STUN server — public, safe to put here (not a secret)
+  STUN_SERVER: "stun://stun.l.google.com:19302"
+  # TURN_HOST and TURN_SECRET come from AWS Secrets Manager via ExternalSecret
+  # (see templates/externalsecret.yaml) — never put here

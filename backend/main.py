@@ -2,7 +2,7 @@
 Main Backend Server - Working Version
 WebRTC signaling + KLV telemetry
 """
-import asyncio, json, logging, os, uuid
+import asyncio, base64, hashlib, hmac, json, logging, os, time, uuid
 from contextlib import asynccontextmanager
 from typing import Dict, Set, Optional
 
@@ -169,6 +169,35 @@ async def del_stream(stream_id: str):
     if pipeline_mgr:
         pipeline_mgr.remove_stream(stream_id)
     return {"status": "removed", "stream_id": stream_id}
+
+
+@app.get("/api/ice-config")
+async def ice_config():
+    """
+    Returns WebRTC ICE server config for the browser.
+    TURN credentials are time-limited (24h) HMAC tokens — the shared secret
+    never leaves the server. Browser gets a use-once credential, not the secret.
+    """
+    stun = os.getenv("STUN_SERVER", "stun://stun.l.google.com:19302")
+    # Browser RTCPeerConnection uses "stun:host" (no double-slash)
+    stun_url = stun.replace("stun://", "stun:") if stun.startswith("stun://") else stun
+    servers = [{"urls": stun_url}]
+
+    turn_host   = os.getenv("TURN_HOST",   "")
+    turn_secret = os.getenv("TURN_SECRET", "")
+    if turn_host and turn_secret:
+        expiry   = int(time.time()) + 86400      # 24-hour window
+        username = str(expiry)
+        password = base64.b64encode(
+            hmac.new(turn_secret.encode(), username.encode(), hashlib.sha1).digest()
+        ).decode()
+        servers.append({
+            "urls":       [f"turn:{turn_host}:3478", f"turns:{turn_host}:5349"],
+            "username":   username,
+            "credential": password,
+        })
+
+    return {"iceServers": servers}
 
 
 @app.get("/api/health")

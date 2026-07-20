@@ -1,0 +1,51 @@
+# ─── Secrets ─────────────────────────────────────────────────────────────────
+secrets/production.env
+secrets/*.key
+secrets/*.pem
+*.env
+.env*
+!*.example
+
+# ─── Terraform ───────────────────────────────────────────────────────────────
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+.terraform.lock.hcl
+infrastructure/terraform/backend.hcl
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+venv/
+.venv/
+
+# ─── Docker ──────────────────────────────────────────────────────────────────
+*.tar
+*.tar.xz
+
+# ─── Media / Binary Test Data ────────────────────────────────────────────────
+*.mpg
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.ts
+*.klv
+*.bin
+
+# ─── Infrastructure (lives in deepstream-webrtc-infra repo) ──────────────────
+infrastructure/
+k8s/
+
+# ─── Local Dev Artifacts ─────────────────────────────────────────────────────
+run_gst_commands.txt
+strems.sh
+check.py
+klv_sender_generate_video.py
+
+# ─── OS ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

@@ -1,0 +1,17 @@
+# Production overrides — merged on top of values.yaml
+replicaCount: 2
+
+resources:
+  requests:
+    memory: 512Mi
+    cpu: 500m
+  limits:
+    memory: 2Gi
+    cpu: 2000m
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+
+env:
+  GST_DEBUG: "1"

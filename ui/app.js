@@ -131,12 +131,25 @@ function getStreamColor(streamId) {
 
 // ── WebRTC ─────────────────────────────────────────────────────────────────────
 
-const RTC_CONFIG = {
-  // STUN is needed so Chrome sends real IP candidates instead of mDNS (.local)
-  // addresses. GStreamer cannot resolve mDNS, so without STUN all ICE candidates
-  // are filtered out and DTLS never completes.
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-};
+// Populated at init() from /api/ice-config.
+// Locally: STUN only (Google public STUN).
+// Production: STUN + TURN with HMAC time-limited credentials from AWS Secrets Manager.
+let RTC_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+async function loadIceConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/ice-config`);
+    if (res.ok) {
+      RTC_CONFIG = await res.json();
+      const urls = RTC_CONFIG.iceServers.map(s =>
+        Array.isArray(s.urls) ? s.urls[0] : s.urls
+      ).join(", ");
+      console.log(`ICE config loaded: ${urls}`);
+    }
+  } catch (e) {
+    console.warn("Could not load ICE config — using default STUN:", e.message);
+  }
+}
 
 /**
  * modify_sdp — ported from the working legacy client.
@@ -794,7 +807,23 @@ function showToast(message, type = "info", duration = 3500) {
 
 const UI = {
   openAddStreamModal() {
+    const count = Object.keys(state.streams).length;
+    if (count >= 4) {
+      showToast("Maximum 4 streams reached. Remove one first.", "error");
+      return;
+    }
     document.getElementById("add-stream-modal").classList.add("open");
+    // Show remaining capacity
+    const hint = document.getElementById("stream-limit-hint");
+    if (hint) hint.textContent = `${count}/4 streams active`;
+    // Auto-suggest next free UDP port
+    const usedPorts = Object.values(state.streams)
+      .map(s => s.config?.uri?.match(/:(\d+)$/)?.[1])
+      .filter(Boolean).map(Number);
+    const freePorts = [5004, 5006, 5008, 5010].filter(p => !usedPorts.includes(p));
+    if (freePorts.length > 0) {
+      document.getElementById("stream-uri").value = `udp://0.0.0.0:${freePorts[0]}`;
+    }
     document.getElementById("stream-uri").focus();
   },
   closeAddStreamModal() {
@@ -897,6 +926,9 @@ document.getElementById("stream-uri").addEventListener("keydown", (e) => {
 // ── Init ──────────────────────────────────────────────────────────────────────
 (async function init() {
   initMap();
+
+  // Fetch ICE config first — must complete before any RTCPeerConnection is created
+  await loadIceConfig();
 
   // Load existing streams from server
   const existing = await fetchStreams();

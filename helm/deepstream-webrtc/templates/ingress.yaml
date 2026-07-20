@@ -1,0 +1,39 @@
+# ─── ALB Ingress ──────────────────────────────────────────────────────────────
+# ALB Ingress Controller מקרא את ה-annotations → יוצר ALB + Target Group ב-AWS
+# לאחר apply: kubectl get ingress -n deepstream-webrtc → תקבל URL ציבורי
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    kubernetes.io/ingress.class:                            alb
+    alb.ingress.kubernetes.io/scheme:                       internet-facing
+    alb.ingress.kubernetes.io/target-type:                  ip
+    alb.ingress.kubernetes.io/load-balancer-attributes:     idle_timeout.timeout_seconds=3600
+    alb.ingress.kubernetes.io/healthcheck-path:             /api/health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthy-threshold-count:      "2"
+    alb.ingress.kubernetes.io/security-groups:              {{ .Values.ingress.albSecurityGroupId | default "" }}
+    {{- if .Values.ingress.certificateArn }}
+    alb.ingress.kubernetes.io/listen-ports:                 '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect:                 "443"
+    alb.ingress.kubernetes.io/certificate-arn:              {{ .Values.ingress.certificateArn }}
+    {{- else }}
+    alb.ingress.kubernetes.io/listen-ports:                 '[{"HTTP":80}]'
+    {{- end }}
+spec:
+  rules:
+    - {{- if .Values.ingress.host }}
+      host: {{ .Values.ingress.host }}
+      {{- end }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "app.fullname" . }}
+                port:
+                  number: 80

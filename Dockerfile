@@ -1,43 +1,13 @@
-# =========================
-# DeepStream Base
-# =========================
-FROM nvcr.io/nvidia/deepstream:6.4-gc-triton-devel
-
+FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# =========================
-# NVIDIA + GStreamer ENV
-# =========================
-ENV NVIDIA_DRIVER_CAPABILITIES=all
-ENV GST_PLUGIN_PATH=/opt/nvidia/deepstream/deepstream/lib/gst-plugins
-ENV LD_LIBRARY_PATH=/opt/nvidia/deepstream/deepstream/lib:$LD_LIBRARY_PATH
-
-# =========================
-# Base system tools
-# =========================
-RUN apt-get update && apt-get install -y \
-    curl \
-    gnupg \
-    lsb-release \
-    && rm -rf /var/lib/apt/lists/*
-
-# =========================
-# IMPORTANT FIX:
-# Remove any broken librealsense repo leftovers
-# =========================
-RUN rm -f /etc/apt/sources.list.d/librealsense.list || true \
- && rm -f /etc/apt/sources.list.d/*realsense* || true \
- && rm -rf /var/lib/apt/lists/*
-RUN /opt/nvidia/deepstream/deepstream/user_additional_install.sh
-
-# =========================
-# Install GStreamer + system deps (NO external repos)
-# =========================
+# ─── GStreamer + system deps ───────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-gi \
     python3-gi-cairo \
     gir1.2-gstreamer-1.0 \
+    gir1.2-gst-plugins-base-1.0 \
     gir1.2-gst-plugins-bad-1.0 \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
@@ -47,40 +17,31 @@ RUN apt-get update && apt-get install -y \
     gstreamer1.0-nice \
     gstreamer1.0-libav \
     gstreamer1.0-rtsp \
-    libgstrtspserver-1.0-dev \
-    ffmpeg \
-    nginx \
-    && rm -rf /var/lib/apt/lists/*
+    libnss-mdns \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -i 's/^hosts:.*/hosts:          files mdns4_minimal [NOTFOUND=return] dns mdns4/' /etc/nsswitch.conf
 
-# =========================
-# Python dependencies
-# =========================
+# ─── Python deps ───────────────────────────────────────────────────────────────
 COPY backend/requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir -r /app/requirements.txt
 
-# =========================
-# App code
-# =========================
+# ─── App code ──────────────────────────────────────────────────────────────────
 COPY backend/ /app/backend/
-COPY ui/ /var/www/html/
+COPY ui/      /app/ui/
 
-# =========================
-# Nginx config
-# =========================
-COPY nginx/nginx.conf /etc/nginx/nginx.conf
+WORKDIR /app/backend
 
-WORKDIR /app
+# ─── Ports ─────────────────────────────────────────────────────────────────────
+# 8080 → FastAPI (HTTP + WebSocket + static files)
+# 5004 → RTP video input (UDP)
+# 5005 → KLV metadata input (UDP)
+# 8554 → RTSP re-stream (TCP)
+EXPOSE 8080 5004/udp 5005/udp 8554
 
-# =========================
-# Ports
-# =========================
-EXPOSE 8080 8554 8443
+ENV USE_GPU=0
+ENV LIBNICE_NOUPNP=1
 
-# =========================
-# GStreamer debug script
-# =========================
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/health')"
 
-# =========================
-# Start services
-# =========================
-CMD ["bash", "-c", "/app/check_plugins.sh && nginx && python3 backend/main.py"]
+CMD ["python3", "main.py"]

@@ -23,7 +23,7 @@ gi.require_version("GstWebRTC", "1.0")
 gi.require_version("GstSdp",    "1.0")
 from gi.repository import Gst, GstWebRTC, GstSdp, GLib
 
-import logging, threading, re
+import base64, hashlib, hmac, logging, threading, re, time as _time
 from typing import Optional, Dict, Callable
 from dataclasses import dataclass
 
@@ -34,6 +34,25 @@ except ImportError:
     HAS_KLV = False
 
 logger = logging.getLogger("pipeline")
+
+# ── ICE / STUN / TURN ─────────────────────────────────────────────────────────
+# GStreamer webrtcbin needs "stun://" scheme; browser API needs "stun:" scheme.
+# We use the stun:// form here; main.py strips it for the browser endpoint.
+_STUN_SERVER = os.getenv("STUN_SERVER", "stun://stun.l.google.com:19302")
+_TURN_HOST   = os.getenv("TURN_HOST",   "")
+_TURN_SECRET = os.getenv("TURN_SECRET", "")
+
+
+def _turn_uri(peer_id: str) -> str:
+    """Build a time-limited TURN URI using COTURN REST API (HMAC-SHA1)."""
+    if not _TURN_HOST or not _TURN_SECRET:
+        return ""
+    expiry   = int(_time.time()) + 3600          # 1-hour window
+    username = f"{expiry}:{peer_id}"
+    password = base64.b64encode(
+        hmac.new(_TURN_SECRET.encode(), username.encode(), hashlib.sha1).digest()
+    ).decode()
+    return f"turn://{username}:{password}@{_TURN_HOST}:3478"
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -88,6 +107,11 @@ def _fix_sdp(sdp: str) -> str:
         if line.strip() == "a=rtcp-mux-only":
             continue
 
+        # Force profile-level-id=42c01f so Chrome decodes constrained-baseline
+        if line.strip().startswith("a=fmtp:") and "profile-level-id=" in line:
+            line = re.sub(r"profile-level-id=[0-9a-fA-F]+",
+                          "profile-level-id=42c01f", line)
+
         out.append(line)
 
     # Fix a=group:BUNDLE to only list video0
@@ -136,6 +160,8 @@ class StreamPipeline:
 
         # All non-test sources: decode → re-encode as H264 constrained-baseline
         # so the output is always compatible with browsers regardless of source.
+        # queue: unlimited buffers (0=unlimited) so frames are never dropped.
+        # sync=false on fakesink so GStreamer doesn't stall on clock sync.
         encode = (
             "! videoconvert ! video/x-raw,format=I420 "
             "! x264enc tune=zerolatency bitrate=2000 speed-preset=ultrafast "
@@ -156,13 +182,19 @@ class StreamPipeline:
             )
 
         elif uri.startswith("udp://"):
+            # Passthrough: sender already outputs constrained-baseline H264 in RTP.
+            # No decode/re-encode → no profile drift, no CPU waste.
             port = uri.split(":")[-1] if ":" in uri else "5004"
-            src = (
+            return (
                 f'udpsrc address=0.0.0.0 port={port} '
                 f'caps="application/x-rtp,media=video,clock-rate=90000,'
                 f'encoding-name=H264,payload=96" '
-                f'! rtpjitterbuffer latency=100 drop-on-latency=true '
-                f'! rtph264depay ! h264parse ! avdec_h264 '
+                f'! rtpjitterbuffer latency=100 drop-on-latency=false do-retransmission=false '
+                f'! rtph264depay '
+                f'! h264parse config-interval=-1 '
+                f'! rtph264pay config-interval=-1 aggregate-mode=zero-latency pt=96 '
+                f'! tee name=tee_{sid} allow-not-linked=true '
+                f'tee_{sid}. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! fakesink sync=false async=false'
             )
 
         elif uri.startswith("rtsp://"):
@@ -172,14 +204,23 @@ class StreamPipeline:
             )
 
         else:
-            src = f"uridecodebin uri={uri} latency=200 "
+            # TS file: filesrc → tsparse → tsdemux → h264 branch
+            # Use sync=false so file plays at full speed without clock stalls.
+            path = uri.replace("file://", "") if uri.startswith("file://") else uri
+            src = (
+                f"filesrc location={path} "
+                f"! tsparse set-timestamps=true "
+                f"! tsdemux name=demux demux. "
+                f"! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 "
+                f"! h264parse "
+            )
 
         return (
             f"{src}"
             f"{encode}"
             f"! rtph264pay config-interval=-1 pt=96 "
             f"! tee name=tee_{sid} allow-not-linked=true "
-            f"tee_{sid}. ! queue ! fakesink sync=false"
+            f"tee_{sid}. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! fakesink sync=false async=false"
         )
 
     # ── Start / Stop ──────────────────────────────────────────────────────────
@@ -277,6 +318,20 @@ class StreamPipeline:
             return False
 
         wb.set_property("bundle-policy", "max-bundle")
+
+        # STUN: tells GStreamer its external (public) IP — required in EKS/cloud.
+        # Without this, webrtcbin only advertises the pod's private 10.x.x.x IP,
+        # which the browser can never reach from the internet.
+        if _STUN_SERVER:
+            wb.set_property("stun-server", _STUN_SERVER)
+
+        # TURN: relay all ICE media through a known public server.
+        # Mandatory in production because EKS pods have ephemeral ports that are
+        # never exposed via NLB. TURN is the only path for browser↔pod media.
+        turn = _turn_uri(peer_id)
+        if turn:
+            wb.emit("add-turn-server", turn)
+            logger.info(f"[{sid}][{peer_id}] TURN configured: {_TURN_HOST}")
 
         # DO NOT call add-transceiver — it always creates a second transceiver
         # when followed by request_pad_simple, resulting in two m=video sections.

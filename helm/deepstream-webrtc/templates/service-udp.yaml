@@ -1,0 +1,37 @@
+# ─── UDP/RTSP Service (NLB) ───────────────────────────────────────────────────
+# type: LoadBalancer + annotations → AWS יוצר NLB אוטומטית
+# Target Groups (NLB → pod:5004, pod:5005, pod:8554) נוצרים אוטומטית
+# גלויים ב: AWS Console → EC2 → Load Balancers → NLB → Target Groups
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "app.fullname" . }}-udp
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "app.labels" . | nindent 4 }}
+  annotations:
+    # NLB (Layer 4) — היחיד שתומך UDP
+    service.beta.kubernetes.io/aws-load-balancer-type:                            "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type:                "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme:                         "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    # Health check על TCP (UDP לא תומך health check ב-NLB)
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol:           "TCP"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port:               "8080"
+spec:
+  type: LoadBalancer
+  selector: {{- include "app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: rtp-video
+      port: {{ .Values.service.udp.rtpPort }}
+      targetPort: {{ .Values.service.udp.rtpPort }}
+      protocol: UDP
+
+    - name: klv-metadata
+      port: {{ .Values.service.udp.klvPort }}
+      targetPort: {{ .Values.service.udp.klvPort }}
+      protocol: UDP
+
+    - name: rtsp
+      port: {{ .Values.service.udp.rtspPort }}
+      targetPort: {{ .Values.service.udp.rtspPort }}
+      protocol: TCP

@@ -1,0 +1,18 @@
+# ─── HTTP Service (ClusterIP) ─────────────────────────────────────────────────
+# ALB Ingress Controller ינתב ל-service זה
+# Target Group (ALB → pod:8080) נוצר אוטומטית ע"י ALB Ingress Controller
+# גלוי ב: AWS Console → EC2 → Target Groups
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "app.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "app.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

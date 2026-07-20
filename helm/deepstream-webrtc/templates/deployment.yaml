@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "app.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "app.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "app.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels: {{- include "app.selectorLabels" . | nindent 8 }}
+      annotations:
+        # גורם לrestart כשה-secret משתנה
+        checksum/secret: {{ include (print $.Template.BasePath "/externalsecret.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: {{ include "app.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: rtp
+              containerPort: {{ .Values.service.udp.rtpPort }}
+              protocol: UDP
+            - name: klv
+              containerPort: {{ .Values.service.udp.klvPort }}
+              protocol: UDP
+            - name: rtsp
+              containerPort: {{ .Values.service.udp.rtspPort }}
+              protocol: TCP
+
+          env:
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+
+          # Secrets מ-AWS Secrets Manager (דרך External Secrets Operator)
+          envFrom:
+            - secretRef:
+                name: deepstream-secrets
+                optional: true
+
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+
+      # Spread pods across AZs
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels: {{- include "app.selectorLabels" . | nindent 14 }}

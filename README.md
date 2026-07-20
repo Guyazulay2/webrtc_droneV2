@@ -44,13 +44,13 @@ deepstream-webrtc-klv/
 
 ```bash
 cd deepstream-webrtc-klv
-docker-compose build
+docker compose build
 ```
 
 ### 2. הפעל
 
 ```bash
-docker-compose up
+docker compose up
 ```
 
 פתח דפדפן: **http://localhost:8080**

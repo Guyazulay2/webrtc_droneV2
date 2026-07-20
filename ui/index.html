@@ -240,10 +240,18 @@
         <button class="preset-btn preset-test" onclick="UI.setPreset('test://snow')">Snow</button>
       </div>
       <div class="presets">
-        <span class="preset-label">📡 Real streams:</span>
-        <button class="preset-btn" onclick="UI.setPreset('udp://0.0.0.0:5004')">UDP :5004</button>
-        <button class="preset-btn" onclick="UI.setPreset('rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4')">Test RTSP</button>
+        <span class="preset-label">📡 UDP (up to 4 streams):</span>
+        <button class="preset-btn" onclick="UI.setPreset('udp://0.0.0.0:5004')">:5004</button>
+        <button class="preset-btn" onclick="UI.setPreset('udp://0.0.0.0:5006')">:5006</button>
+        <button class="preset-btn" onclick="UI.setPreset('udp://0.0.0.0:5008')">:5008</button>
+        <button class="preset-btn" onclick="UI.setPreset('udp://0.0.0.0:5010')">:5010</button>
       </div>
+      <div class="presets">
+        <span class="preset-label">🔗 RTSP:</span>
+        <button class="preset-btn" onclick="UI.setPreset('rtsp://192.168.1.100:554/stream')">Camera</button>
+        <button class="preset-btn" onclick="UI.setPreset('rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4')">Demo</button>
+      </div>
+      <div id="stream-limit-hint" style="font-size:12px;color:#888;margin-top:6px"></div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="UI.closeAddStreamModal()">Cancel</button>

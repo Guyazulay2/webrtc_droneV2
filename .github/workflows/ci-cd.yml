@@ -29,8 +29,6 @@ env:
 permissions:
   id-token: write
   contents: write
-  pull-requests: write
-  checks: write
 
 jobs:
   lint:
@@ -57,39 +55,43 @@ jobs:
           scandir: "."
           severity: error
 
-  test:
-    name: Test
+  build:
+    name: Build, Test, Push
     runs-on: ubuntu-latest
     needs: lint
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -r backend/requirements.txt pytest
-
-      - name: Publish test results
-        uses: EnricoMi/publish-unit-test-result-action@v2
-        if: always()
-
-  build:
-    name: Build and Push
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
 
     outputs:
-      image: ${{ steps.set-image.outputs.image }}
+      image: ${{ steps.push.outputs.image }}
       registry: ${{ steps.login-ecr.outputs.registry }}
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the image into the local Docker daemon (no push yet)
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: deepstream-webrtc:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+
+      # Run the test suite inside the built container
+      - name: Run tests
+        run: |
+          docker run --rm deepstream-webrtc:ci \
+            sh -c "pip3 install --quiet pytest && python3 -m pytest test_klv_parser.py -v --tb=short"
+
+      # Push to ECR only on master, after tests pass
       - name: Authenticate to AWS
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
@@ -97,36 +99,25 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
-            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
-          cache-from: >-
-            type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:cache
-          cache-to: >-
-            type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:cache,mode=max
-          build-args: |
-            GIT_COMMIT=${{ github.sha }}
-
-      - name: Set image output
-        id: set-image
+      - name: Push to ECR
+        id: push
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         run: |
-          IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}"
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          ECR="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+          docker tag deepstream-webrtc:ci "${ECR}:${{ env.IMAGE_TAG }}"
+          docker tag deepstream-webrtc:ci "${ECR}:latest"
+          docker push "${ECR}:${{ env.IMAGE_TAG }}"
+          docker push "${ECR}:latest"
+          echo "image=${ECR}:${{ env.IMAGE_TAG }}" >> "$GITHUB_OUTPUT"
 
   scan:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: build
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4

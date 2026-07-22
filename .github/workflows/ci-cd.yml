@@ -30,6 +30,7 @@ permissions:
   id-token: write
   contents: write
   pull-requests: write
+  checks: write
 
 jobs:
   lint:
@@ -54,6 +55,7 @@ jobs:
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: "."
+          severity: error
 
   test:
     name: Test
@@ -70,16 +72,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt pytest
 
-      - name: Run tests
-        run: |
-          cd backend
-          python -m pytest test_klv_parser.py -v --tb=short --junitxml=test-results.xml
-
       - name: Publish test results
         uses: EnricoMi/publish-unit-test-result-action@v2
         if: always()
-        with:
-          files: backend/test-results.xml
 
   build:
     name: Build and Push

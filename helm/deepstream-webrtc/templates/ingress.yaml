@@ -15,7 +15,9 @@ metadata:
     alb.ingress.kubernetes.io/healthcheck-path:             /api/health
     alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
     alb.ingress.kubernetes.io/healthy-threshold-count:      "2"
-    alb.ingress.kubernetes.io/security-groups:              {{ .Values.ingress.albSecurityGroupId | default "" }}
+    {{- if .Values.ingress.albSecurityGroupId }}
+    alb.ingress.kubernetes.io/security-groups:             {{ .Values.ingress.albSecurityGroupId }}
+    {{- end }}
     {{- if .Values.ingress.certificateArn }}
     alb.ingress.kubernetes.io/listen-ports:                 '[{"HTTP":80},{"HTTPS":443}]'
     alb.ingress.kubernetes.io/ssl-redirect:                 "443"

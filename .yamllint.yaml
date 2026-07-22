@@ -1,0 +1,14 @@
+---
+extends: default
+ignore: |
+  helm/deepstream-webrtc/templates/
+rules:
+  document-start: disable
+  line-length:
+    max: 150
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  braces:
+    min-spaces-inside: 0
+    max-spaces-inside: 1

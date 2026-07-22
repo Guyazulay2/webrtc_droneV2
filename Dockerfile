@@ -1,7 +1,6 @@
 FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ─── GStreamer + system deps ───────────────────────────────────────────────────
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
@@ -20,23 +19,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-rtsp \
     libnss-mdns \
     && rm -rf /var/lib/apt/lists/* \
-    && sed -i 's/^hosts:.*/hosts:          files mdns4_minimal [NOTFOUND=return] dns mdns4/' /etc/nsswitch.conf
+    && sed -i \
+        's/^hosts:.*/hosts: files mdns4_minimal [NOTFOUND=return] dns mdns4/' \
+        /etc/nsswitch.conf
 
-# ─── Python deps ───────────────────────────────────────────────────────────────
 COPY backend/requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir -r /app/requirements.txt
 
-# ─── App code ──────────────────────────────────────────────────────────────────
 COPY backend/ /app/backend/
-COPY ui/      /app/ui/
+COPY ui/ /app/ui/
 
 WORKDIR /app/backend
 
-# ─── Ports ─────────────────────────────────────────────────────────────────────
-# 8080 → FastAPI (HTTP + WebSocket + static files)
-# 5004 → RTP video input (UDP)
-# 5005 → KLV metadata input (UDP)
-# 8554 → RTSP re-stream (TCP)
 EXPOSE 8080 5004/udp 5005/udp 8554
 
 ENV USE_GPU=0

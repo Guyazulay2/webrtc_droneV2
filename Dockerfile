@@ -2,7 +2,7 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ─── GStreamer + system deps ───────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-gi \
     python3-gi-cairo \

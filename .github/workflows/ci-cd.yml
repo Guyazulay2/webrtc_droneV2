@@ -73,7 +73,7 @@ jobs:
       - name: Run tests
         run: |
           cd backend
-          python -m pytest test_webrtc.py -v --tb=short --junitxml=test-results.xml
+          python -m pytest test_klv_parser.py -v --tb=short --junitxml=test-results.xml
 
       - name: Publish test results
         uses: EnricoMi/publish-unit-test-result-action@v2

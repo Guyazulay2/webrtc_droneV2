@@ -4,7 +4,7 @@ WebRTC signaling + KLV telemetry
 """
 import asyncio, base64, hashlib, hmac, json, logging, os, time, uuid
 from contextlib import asynccontextmanager
-from typing import Dict, Set, Optional
+from typing import Dict, List, Set, Optional
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -22,6 +22,7 @@ pipeline_mgr:  Optional[PipelineManager] = None
 telemetry_mgr = None
 signaling_mgr  = None
 _loop:         Optional[asyncio.AbstractEventLoop] = None
+_klv_redis_subs: List = []   # KLVRedisSubscriber instances, stopped on shutdown
 
 
 class SignalingManager:
@@ -84,25 +85,62 @@ def send_signaling(peer_id: str, msg: dict):
             signaling_mgr.send(peer_id, msg), _loop)
 
 
+async def _on_klv_redis(stream_id: str, klv_dict: dict):
+    """Called by KLVRedisSubscriber — broadcasts parsed KLV to this pod's WebSocket subscribers."""
+    if telemetry_mgr:
+        await telemetry_mgr.broadcast(stream_id, klv_dict)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pipeline_mgr, telemetry_mgr, signaling_mgr, _loop
+    global pipeline_mgr, telemetry_mgr, signaling_mgr, _loop, _klv_redis_subs
     _loop         = asyncio.get_event_loop()
     telemetry_mgr = TelemetryManager()
     signaling_mgr = SignalingManager()
-    pipeline_mgr  = PipelineManager(
+
+    # Redis: optional, enabled when REDIS_URL is set
+    redis_client = None
+    redis_url    = os.getenv("REDIS_URL", "")
+    if redis_url:
+        try:
+            import redis.asyncio as aioredis
+            redis_client = aioredis.from_url(redis_url, decode_responses=False)
+            await redis_client.ping()
+            logger.info(f"Redis connected: {redis_url}")
+        except Exception as e:
+            logger.warning(f"Redis unavailable ({e}), falling back to single-pod mode")
+            redis_client = None
+
+    pipeline_mgr = PipelineManager(
         on_klv=on_klv_received,
         send_signaling=send_signaling,
+        redis_client=redis_client,
     )
     pipeline_mgr.start_mainloop()
-    if hasattr(pipeline_mgr, "set_event_loop"):
-        pipeline_mgr.set_event_loop(_loop)
     logger.info("Server started")
+
     for i, uri in enumerate(os.getenv("STREAMS", "").split()):
-        if uri.strip():
-            pipeline_mgr.add_stream(StreamConfig(
-                stream_id=f"auto_{i}", uri=uri.strip(), name=f"Stream {i+1}"))
+        uri = uri.strip()
+        if not uri:
+            continue
+        sid = f"auto_{i}"
+        await pipeline_mgr.add_stream(StreamConfig(
+            stream_id=sid, uri=uri, name=f"Stream {i+1}"))
+
+        # Per-pod KLV subscriber: receives from Redis and forwards to WebSocket clients
+        if redis_client and uri.startswith("udp://"):
+            from redis_bridge import KLVRedisSubscriber
+            sub = KLVRedisSubscriber(sid, redis_client, _on_klv_redis)
+            sub.start()
+            _klv_redis_subs.append(sub)
+
     yield
+
+    for sub in _klv_redis_subs:
+        sub.stop()
+    _klv_redis_subs.clear()
+    if redis_client:
+        await redis_client.aclose()
     pipeline_mgr.stop_mainloop()
     logger.info("Server stopped")
 
@@ -158,8 +196,16 @@ async def add_stream(req: AddStreamRequest):
         name=req.name or req.uri,
         width=req.width, height=req.height,
     )
-    if not pipeline_mgr.add_stream(cfg):
+    if not await pipeline_mgr.add_stream(cfg):
         raise HTTPException(500, "Failed to start pipeline")
+
+    # Start per-pod KLV subscriber when Redis is active
+    if pipeline_mgr._redis_client and req.uri.startswith("udp://"):
+        from redis_bridge import KLVRedisSubscriber
+        sub = KLVRedisSubscriber(sid, pipeline_mgr._redis_client, _on_klv_redis)
+        sub.start()
+        _klv_redis_subs.append(sub)
+
     logger.info(f"Stream added: {sid} {req.uri}")
     return {"stream_id": sid, "uri": req.uri, "name": cfg.name}
 

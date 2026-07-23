@@ -14,6 +14,11 @@ env:
   GST_DEBUG: "1"
   TURN_HOST: "44.209.54.242"
   STREAMS: "test://snow udp://:5004"
+  REDIS_URL: "redis://deepstream-webrtc-redis:6379"
+
+redis:
+  enabled: true
+  url: "redis://deepstream-webrtc-redis:6379"
 image:
   repository: 008971651280.dkr.ecr.us-east-1.amazonaws.com/deepstream-webrtc-klv
   tag: "1.2"

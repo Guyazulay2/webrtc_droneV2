@@ -36,3 +36,8 @@ env:
   USE_GPU: "0"
   LIBNICE_NOUPNP: "1"
   STUN_SERVER: "stun://stun.l.google.com:19302"
+
+redis:
+  enabled: false
+  # ClusterIP service name follows Helm release name, e.g. deepstream-webrtc-redis
+  url: ""

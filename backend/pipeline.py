@@ -24,7 +24,7 @@ gi.require_version("GstSdp",    "1.0")
 from gi.repository import Gst, GstWebRTC, GstSdp, GLib
 
 import base64, hashlib, hmac, logging, threading, re, time as _time
-from typing import Optional, Dict, Callable
+from typing import Optional, Dict, Callable, Any
 from dataclasses import dataclass
 
 try:
@@ -137,16 +137,24 @@ class StreamPipeline:
     """
 
     def __init__(self, config: StreamConfig,
-                 on_klv:   Callable,
-                 on_error: Callable):
+                 on_klv:       Callable,
+                 on_error:     Callable,
+                 redis_client: Any = None):
         self.config   = config
         self.on_klv   = on_klv
         self.on_error = on_error
+        self._redis   = redis_client
 
         self.pipeline      = None
         self.tee           = None
         self._klv_pipeline = None
         self._lock         = threading.Lock()
+
+        # Redis bridge components (used when self._redis is set and uri is udp://)
+        self._appsrc:        Any = None
+        self._udp_ingestor:  Any = None
+        self._klv_ingestor:  Any = None
+        self._redis_feeder:  Any = None
 
         # peer_id → {"wb": webrtcbin, "q": queue, "tee_src": pad,
         #             "send_fn": callable, "cleanup": callable}
@@ -182,19 +190,35 @@ class StreamPipeline:
             )
 
         elif uri.startswith("udp://"):
-            # Passthrough: sender already outputs constrained-baseline H264 in RTP.
-            # No decode/re-encode → no profile drift, no CPU waste.
+            # Passthrough: sender outputs constrained-baseline H264 in RTP.
+            # When Redis is available we use appsrc (fed from Redis by RedisVideoFeeder)
+            # so every pod can serve WebRTC peers regardless of which pod NLB chose.
+            # Without Redis, fall back to udpsrc (single-pod mode).
             port = uri.split(":")[-1] if ":" in uri else "5004"
-            return (
-                f'udpsrc address=0.0.0.0 port={port} '
-                f'caps="application/x-rtp,media=video,clock-rate=90000,'
-                f'encoding-name=H264,payload=96" '
+            rtp_caps = (
+                f'application/x-rtp,media=video,clock-rate=90000,'
+                f'encoding-name=H264,payload=96'
+            )
+            tail = (
                 f'! rtpjitterbuffer latency=100 drop-on-latency=false do-retransmission=false '
                 f'! rtph264depay '
                 f'! h264parse config-interval=-1 '
                 f'! rtph264pay config-interval=-1 aggregate-mode=zero-latency pt=96 '
                 f'! tee name=tee_{sid} allow-not-linked=true '
-                f'tee_{sid}. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 ! fakesink sync=false async=false'
+                f'tee_{sid}. ! queue max-size-buffers=0 max-size-bytes=0 max-size-time=0 '
+                f'! fakesink sync=false async=false'
+            )
+            if self._redis:
+                # appsrc is fed by RedisVideoFeeder after the pipeline starts
+                return (
+                    f'appsrc name=src_{sid} format=time is-live=true do-timestamp=true '
+                    f'caps="{rtp_caps}" '
+                    f'{tail}'
+                )
+            return (
+                f'udpsrc address=0.0.0.0 port={port} '
+                f'caps="{rtp_caps}" '
+                f'{tail}'
             )
 
         elif uri.startswith("rtsp://"):
@@ -233,6 +257,9 @@ class StreamPipeline:
         self.pipeline = Gst.parse_launch(pipe_str)
         self.tee      = self.pipeline.get_by_name(f"tee_{self.config.stream_id}")
 
+        if self._redis and self.config.uri.startswith("udp://"):
+            self._appsrc = self.pipeline.get_by_name(f"src_{self.config.stream_id}")
+
         bus = self.pipeline.get_bus()
         bus.add_signal_watch()
         bus.connect("message", self._on_bus)
@@ -241,10 +268,46 @@ class StreamPipeline:
         self.pipeline.get_state(Gst.SECOND * 5)
         logger.info(f"[{self.config.stream_id}] PLAYING")
 
-        if self.config.klv_port and HAS_KLV:
+        # Without Redis: start the GStreamer-based KLV listener directly.
+        # With Redis: KLVIngestor + KLVRedisSubscriber are started by start_redis().
+        if self.config.klv_port and HAS_KLV and not self._redis:
             self._start_klv(self.config.klv_port)
 
+    async def start_redis(self):
+        """
+        Start Redis bridge components for UDP streams.
+        Must be called from async context after start().
+        No-op for non-UDP streams or when no Redis client is set.
+        """
+        if not self._redis or not self.config.uri.startswith("udp://"):
+            return
+
+        from redis_bridge import UDPIngestor, KLVIngestor, RedisVideoFeeder
+
+        sid = self.config.stream_id
+        try:
+            port = int(self.config.uri.split(":")[-1])
+        except (ValueError, IndexError):
+            port = 5004
+
+        self._udp_ingestor = UDPIngestor(port, self._redis, sid)
+        await self._udp_ingestor.start()
+
+        self._redis_feeder = RedisVideoFeeder(sid, self._redis, self._appsrc)
+        self._redis_feeder.start()
+
+        if HAS_KLV and self.config.klv_port:
+            self._klv_ingestor = KLVIngestor(
+                self.config.klv_port, self._redis, sid, parse_klv_from_buffer)
+            await self._klv_ingestor.start()
+
     def stop(self):
+        if self._redis_feeder:
+            self._redis_feeder.stop()
+        if self._udp_ingestor:
+            self._udp_ingestor.stop()
+        if self._klv_ingestor:
+            self._klv_ingestor.stop()
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
         if self._klv_pipeline:
@@ -464,9 +527,10 @@ class StreamPipeline:
 class PipelineManager:
 
     def __init__(self, on_klv: Callable, send_signaling: Callable,
-                 use_gpu: bool = False):
+                 use_gpu: bool = False, redis_client: Any = None):
         self.on_klv         = on_klv
         self.send_signaling = send_signaling
+        self._redis_client  = redis_client
         self.streams: Dict[str, StreamPipeline] = {}
         self._mainloop      = None
 
@@ -480,7 +544,7 @@ class PipelineManager:
         if self._mainloop:
             self._mainloop.quit()
 
-    def add_stream(self, config: StreamConfig) -> bool:
+    async def add_stream(self, config: StreamConfig) -> bool:
         if config.stream_id in self.streams:
             return False
         # Auto-assign KLV port for UDP streams (RTP port + 1)
@@ -489,9 +553,11 @@ class PipelineManager:
                 config.klv_port = int(config.uri.split(":")[-1]) + 1
             except Exception:
                 pass
-        pipe = StreamPipeline(config, self.on_klv, self._on_error)
+        pipe = StreamPipeline(config, self.on_klv, self._on_error, self._redis_client)
         try:
             pipe.start()
+            if self._redis_client:
+                await pipe.start_redis()
             self.streams[config.stream_id] = pipe
             return True
         except Exception as e:

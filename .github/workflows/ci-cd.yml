@@ -9,6 +9,7 @@ name: CI/CD
       - "ui/**"
       - "helm/**"
       - "Dockerfile"
+      - "VERSION"
   pull_request:
     branches: [master, main]
     paths:
@@ -16,6 +17,7 @@ name: CI/CD
       - "ui/**"
       - "helm/**"
       - "Dockerfile"
+      - "VERSION"
 
 concurrency:
   group: deploy-production
@@ -24,7 +26,6 @@ concurrency:
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: deepstream-webrtc-klv
-  IMAGE_TAG: ${{ github.sha }}
 
 permissions:
   id-token: write
@@ -64,14 +65,18 @@ jobs:
     outputs:
       image: ${{ steps.push.outputs.image }}
       registry: ${{ steps.login-ecr.outputs.registry }}
+      version: ${{ steps.version.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read version
+        id: version
+        run: echo "tag=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build the image into the local Docker daemon (no push yet)
       - name: Build image
         uses: docker/build-push-action@v5
         with:
@@ -84,13 +89,11 @@ jobs:
           build-args: |
             GIT_COMMIT=${{ github.sha }}
 
-      # Run the test suite inside the built container
       - name: Run tests
         run: |
           docker run --rm deepstream-webrtc:ci \
             sh -c "pip3 install --quiet pytest && python3 -m pytest test_klv_parser.py -v --tb=short"
 
-      # Push to ECR only on master, after tests pass
       - name: Authenticate to AWS
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         uses: aws-actions/configure-aws-credentials@v4
@@ -108,11 +111,12 @@ jobs:
         if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
         run: |
           ECR="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
-          docker tag deepstream-webrtc:ci "${ECR}:${{ env.IMAGE_TAG }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          docker tag deepstream-webrtc:ci "${ECR}:${TAG}"
           docker tag deepstream-webrtc:ci "${ECR}:latest"
-          docker push "${ECR}:${{ env.IMAGE_TAG }}"
+          docker push "${ECR}:${TAG}"
           docker push "${ECR}:latest"
-          echo "image=${ECR}:${{ env.IMAGE_TAG }}" >> "$GITHUB_OUTPUT"
+          echo "image=${ECR}:${TAG}" >> "$GITHUB_OUTPUT"
 
   scan:
     name: Security Scan
@@ -170,28 +174,33 @@ jobs:
             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Update image tag in Helm values
+      - name: Update Helm values and bump version
         run: |
+          VERSION="${{ needs.build.outputs.version }}"
           ECR_REGISTRY="${{ needs.build.outputs.registry }}"
           yq -i ".image.repository = \"${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}\"" \
             helm/deepstream-webrtc/values-production.yaml
-          yq -i ".image.tag = \"${{ env.IMAGE_TAG }}\"" \
+          yq -i ".image.tag = \"${VERSION}\"" \
             helm/deepstream-webrtc/values-production.yaml
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          echo "${MAJOR}.$((MINOR + 1))" > VERSION
 
-      - name: Commit and push image tag
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add helm/deepstream-webrtc/values-production.yaml
-          git commit -m "chore(release): update image to ${{ env.IMAGE_TAG }} [skip ci]"
+          git add helm/deepstream-webrtc/values-production.yaml VERSION
+          git pull --rebase
+          git commit -m "chore(release): deploy v${{ needs.build.outputs.version }} [skip ci]"
           git push
 
   notify:
     name: Done
     runs-on: ubuntu-latest
-    needs: [update-image-tag]
+    needs: [build, update-image-tag]
     if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
 
     steps:
       - name: Pipeline complete
-        run: echo "Deploy complete — image ${{ env.IMAGE_TAG }} pushed to ECR and ArgoCD updated."
+        run: echo "Deploy complete — version ${{ needs.build.outputs.version }} pushed to ECR and ArgoCD updated."

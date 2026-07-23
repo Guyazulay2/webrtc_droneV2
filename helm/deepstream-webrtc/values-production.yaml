@@ -1,5 +1,5 @@
 # Production overrides — merged on top of values.yaml
-replicaCount: 1
+replicaCount: 2
 resources:
   requests:
     memory: 512Mi
@@ -8,8 +8,8 @@ resources:
     memory: 2Gi
     cpu: 2000m
 hpa:
-  minReplicas: 1
-  maxReplicas: 1
+  minReplicas: 2
+  maxReplicas: 10
 env:
   GST_DEBUG: "1"
   TURN_HOST: "44.209.54.242"

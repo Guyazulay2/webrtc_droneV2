@@ -375,12 +375,11 @@ class StreamPipeline:
 
         # Connect signals before syncing state so on-negotiation-needed is caught.
         wb.connect("on-negotiation-needed", _on_negotiation_needed)
-        wb.connect(
-            "on-ice-candidate",
-            lambda e, idx, cand: send_fn(
-                {"type": "ice", "candidate": cand, "sdpMLineIndex": idx}
-            ),
-        )
+        def _on_ice(element, idx, cand):
+            logger.info(f"[{sid}][{peer_id}] ICE → browser: {cand[:80]}")
+            send_fn({"type": "ice", "candidate": cand, "sdpMLineIndex": idx})
+
+        wb.connect("on-ice-candidate", _on_ice)
 
         # ── Pipeline linkage — runs on GLib main loop thread ──────────────────
         def _do_link():

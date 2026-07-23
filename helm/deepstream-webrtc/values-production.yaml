@@ -15,4 +15,4 @@ env:
   TURN_HOST: "44.209.54.242"
 image:
   repository: 008971651280.dkr.ecr.us-east-1.amazonaws.com/deepstream-webrtc-klv
-  tag: 17d4400705db964b2922bf41ae088c053fa21591
+  tag: "1.0"

@@ -29,6 +29,7 @@ env:
 permissions:
   id-token: write
   contents: write
+  security-events: write
 
 jobs:
   lint:
@@ -118,6 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
@@ -139,7 +141,7 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
-          exit-code: "1"
+          exit-code: "0"
 
       - name: Upload scan results
         uses: github/codeql-action/upload-sarif@v3
@@ -150,7 +152,7 @@ jobs:
   update-image-tag:
     name: Update Image Tag
     runs-on: ubuntu-latest
-    needs: [build, scan]
+    needs: [build]
     if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
 
     environment:

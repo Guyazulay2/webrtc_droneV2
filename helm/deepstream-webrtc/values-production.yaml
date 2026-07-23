@@ -16,4 +16,4 @@ env:
   STREAMS: "test://snow udp://:5004"
 image:
   repository: 008971651280.dkr.ecr.us-east-1.amazonaws.com/deepstream-webrtc-klv
-  tag: "1.0"
+  tag: "1.1"

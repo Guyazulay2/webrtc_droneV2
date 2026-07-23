@@ -1,6 +1,5 @@
 # Production overrides — merged on top of values.yaml
 replicaCount: 2
-
 resources:
   requests:
     memory: 512Mi
@@ -8,11 +7,12 @@ resources:
   limits:
     memory: 2Gi
     cpu: 2000m
-
 hpa:
   minReplicas: 2
   maxReplicas: 10
-
 env:
   GST_DEBUG: "1"
   TURN_HOST: "44.209.54.242"
+image:
+  repository: 008971651280.dkr.ecr.us-east-1.amazonaws.com/deepstream-webrtc-klv
+  tag: 0315ad5c5634dbbc79bc8a93277846c28e7b4fb2

@@ -297,113 +297,134 @@ class StreamPipeline:
                 buf.unmap(mi)
         return Gst.FlowReturn.OK
 
-    # ── Peer management — direct port of test_webrtc.py attach_peer() ────────
+    # ── Peer management ───────────────────────────────────────────────────────
 
     def attach_peer(self, peer_id: str, send_fn: Callable) -> bool:
         """
         Attach a new WebRTC peer.  send_fn(msg_dict) sends JSON to the browser.
         Returns True on success.
 
-        This is a line-for-line port of the working test_webrtc.py attach_peer(),
-        with the only additions being:
-          - GLib.idle_add wrappers for calls that arrive from the asyncio thread
-          - tee linkage instead of a fixed appsrc
+        All GStreamer pipeline mutations run inside GLib.idle_add() so they
+        execute on the GLib main loop thread.  Calling pipeline.add / pad.link /
+        sync_state_with_parent from the asyncio thread while the main loop is
+        running is unsafe and was silently preventing on-negotiation-needed from
+        firing.
         """
         sid = self.config.stream_id
 
-        q  = Gst.ElementFactory.make("queue",      None)
-        wb = Gst.ElementFactory.make("webrtcbin",  None)
+        q  = Gst.ElementFactory.make("queue",     None)
+        wb = Gst.ElementFactory.make("webrtcbin", None)
         if not q or not wb:
             logger.error(f"[{sid}] Could not create queue/webrtcbin elements")
             return False
 
         wb.set_property("bundle-policy", "max-bundle")
-
-        # STUN: tells GStreamer its external (public) IP — required in EKS/cloud.
-        # Without this, webrtcbin only advertises the pod's private 10.x.x.x IP,
-        # which the browser can never reach from the internet.
         if _STUN_SERVER:
             wb.set_property("stun-server", _STUN_SERVER)
-
-        # TURN: relay all ICE media through a known public server.
-        # Mandatory in production because EKS pods have ephemeral ports that are
-        # never exposed via NLB. TURN is the only path for browser↔pod media.
         turn = _turn_uri(peer_id)
         if turn:
             wb.emit("add-turn-server", turn)
             logger.info(f"[{sid}][{peer_id}] TURN configured: {_TURN_HOST}")
 
-        # DO NOT call add-transceiver — it always creates a second transceiver
-        # when followed by request_pad_simple, resulting in two m=video sections.
-        # GStreamer creates a SENDRECV transceiver automatically from request_pad_simple.
-        # We strip the duplicate video1 section in _fix_sdp before sending to browser.
-
-        self.pipeline.add(q)
-        self.pipeline.add(wb)
-        q.get_static_pad("src").link(wb.request_pad_simple("sink_%u"))
-        tee_src = self.tee.request_pad_simple("src_%u")
-        tee_src.link(q.get_static_pad("sink"))
+        offer_sent  = [False]
+        tee_src_ref = [None]
 
         # ── Offer callback ────────────────────────────────────────────────────
-        offer_sent = [False]
-
-        def _on_offer(promise, element, _):
+        def _on_offer(promise):
+            """Called by GStreamer (GLib thread) when create-offer completes."""
             promise.wait()
             reply = promise.get_reply()
             if not reply:
+                logger.error(f"[{sid}][{peer_id}] create-offer: no reply")
                 return
             offer = reply.get_value("offer")
             if not offer:
+                err = reply.get_value("error")
+                logger.error(
+                    f"[{sid}][{peer_id}] create-offer: offer=None err={err}"
+                )
                 return
-            sdp_text = offer.sdp.as_text()
-            sdp_text = _fix_sdp(sdp_text)  # strip video1, fix direction
-            set_ld = Gst.Promise.new()
-            element.emit("set-local-description", offer, set_ld)
-            set_ld.interrupt()
-            logger.info(f"[{sid}][{peer_id}] SDP offer →\n{sdp_text}")
-            send_fn({"type": "offer", "sdp": sdp_text})
+            raw_sdp   = offer.sdp.as_text()
+            fixed_sdp = _fix_sdp(raw_sdp)
+
+            # set-local-description MUST use the same SDP we send to the browser.
+            # Using the original (unfixed) offer causes a mismatch: Chrome builds
+            # its answer from the fixed SDP, GStreamer expects the original, and
+            # rejects the answer.
+            _, fixed_msg = GstSdp.SDPMessage.new_from_text(fixed_sdp)
+            fixed_offer  = GstWebRTC.WebRTCSessionDescription.new(
+                GstWebRTC.WebRTCSDPType.OFFER, fixed_msg)
+            ld_promise = Gst.Promise.new()
+            wb.emit("set-local-description", fixed_offer, ld_promise)
+            ld_promise.interrupt()
+
+            logger.info(f"[{sid}][{peer_id}] SDP offer → browser")
+            send_fn({"type": "offer", "sdp": fixed_sdp})
 
         def _on_negotiation_needed(element):
             if offer_sent[0]:
                 return
             offer_sent[0] = True
             logger.info(f"[{sid}][{peer_id}] on-negotiation-needed → create-offer")
-            promise = Gst.Promise.new_with_change_func(_on_offer, element, None)
+            # Use a lambda wrapper: GI may call the change-func as (promise,) or
+            # (promise, user_data) depending on version.  The lambda absorbs any
+            # extra positional args so we never get a TypeError.
+            promise = Gst.Promise.new_with_change_func(
+                lambda p, *_: _on_offer(p), None, None)
             element.emit("create-offer", None, promise)
 
-        # 3. Connect signals BEFORE sync_state so we don't miss on-negotiation-needed
+        # Connect signals before syncing state so on-negotiation-needed is caught.
         wb.connect("on-negotiation-needed", _on_negotiation_needed)
         wb.connect(
             "on-ice-candidate",
             lambda e, idx, cand: send_fn(
                 {"type": "ice", "candidate": cand, "sdpMLineIndex": idx}
-            )
+            ),
         )
 
-        # 4. sync_state fires on-negotiation-needed — signal is now connected
-        q.sync_state_with_parent()
-        wb.sync_state_with_parent()
-
-        # ── 5. Cleanup helper ─────────────────────────────────────────────────
-        def cleanup():
+        # ── Pipeline linkage — runs on GLib main loop thread ──────────────────
+        def _do_link():
             try:
-                wb.set_state(Gst.State.NULL)
-                q.set_state(Gst.State.NULL)
-                self.pipeline.remove(wb)
-                self.pipeline.remove(q)
-                self.tee.release_request_pad(tee_src)
-            except Exception as ex:
-                logger.warning(f"[{sid}][{peer_id}] cleanup error: {ex}")
+                self.pipeline.add(q)
+                self.pipeline.add(wb)
+                q.get_static_pad("src").link(wb.request_pad_simple("sink_%u"))
+                tee_src = self.tee.request_pad_simple("src_%u")
+                tee_src.link(q.get_static_pad("sink"))
+                tee_src_ref[0] = tee_src
+                q.sync_state_with_parent()
+                wb.sync_state_with_parent()
+                logger.info(f"[{sid}] Peer {peer_id} attached")
+            except Exception as exc:
+                logger.error(
+                    f"[{sid}] _do_link error for peer {peer_id}: {exc}",
+                    exc_info=True,
+                )
+            return False  # do not repeat
 
-        # ── 6. Answer / ICE handlers (called from asyncio → must use idle_add) ─
+        GLib.idle_add(_do_link)
+
+        # ── Cleanup ───────────────────────────────────────────────────────────
+        def cleanup():
+            def _do():
+                try:
+                    wb.set_state(Gst.State.NULL)
+                    q.set_state(Gst.State.NULL)
+                    self.pipeline.remove(wb)
+                    self.pipeline.remove(q)
+                    if tee_src_ref[0]:
+                        self.tee.release_request_pad(tee_src_ref[0])
+                except Exception as ex:
+                    logger.warning(f"[{sid}][{peer_id}] cleanup error: {ex}")
+                return False
+            GLib.idle_add(_do)
+
+        # ── Answer / ICE — called from asyncio thread, must use idle_add ──────
         def set_answer(sdp: str):
-            # Fix packetization-mode before GStreamer sees the answer
             sdp = _fix_answer(sdp)
             def _apply():
                 _, sdp_msg = GstSdp.SDPMessage.new_from_text(sdp)
                 answer = GstWebRTC.WebRTCSessionDescription.new(
                     GstWebRTC.WebRTCSDPType.ANSWER, sdp_msg)
-                # Exactly as test_webrtc.py: plain Promise.new()
                 wb.emit("set-remote-description", answer, Gst.Promise.new())
                 logger.info(f"[{sid}][{peer_id}] answer applied")
                 return False
@@ -421,15 +442,14 @@ class StreamPipeline:
 
         with self._lock:
             self.peers[peer_id] = {
-                "wb":        wb,
-                "q":         q,
-                "tee_src":   tee_src,
+                "wb":         wb,
+                "q":          q,
+                "tee_src":    None,   # filled by _do_link
                 "set_answer": set_answer,
                 "add_ice":    add_ice,
                 "cleanup":    cleanup,
             }
 
-        logger.info(f"[{sid}] Peer {peer_id} attached")
         return True
 
     def detach_peer(self, peer_id: str):

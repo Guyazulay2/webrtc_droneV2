@@ -15,3 +15,4 @@ hpa:
 
 env:
   GST_DEBUG: "1"
+  TURN_HOST: "44.209.54.242"
